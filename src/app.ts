@@ -11,6 +11,7 @@ import { env } from './config/env.js';
 import { apiLimiter } from './middlewares/rateLimiter.js';
 
 import ngoRoutes from "./routes/organization.routes.js";
+import organization from "./routes/organization.routes.js";
 import { auth } from './lib/auth.js';
 import { toNodeHandler } from "better-auth/node";
 import { requireVerifiedOrg } from "./middlewares/requireVerifiedOrg.js";
@@ -66,7 +67,7 @@ app.get("/api/me", async (req, res) => {
     res.json(session.user);
 });
 
-app.use('/api/ngos', ngoRoutes);
+app.use('/api/organization', organization);
 // app.use('/api/rescues', rescueRoutes);
 // entire route group protected in one line
 // app.use("/api/ngos/rescues", requireVerifiedOrg, rescueRoutes);

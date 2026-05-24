@@ -20,6 +20,14 @@ export const roleEnum = pgEnum("role", [
   "superadmin",
 ]);
 
+// ─── ENUMS (Add this to your existing enums) ───────────
+export const organizationTypeEnum = pgEnum("organization_type", [
+  "ngo",
+  "clinic",
+  "shelter",
+  "rescue_center",
+]);
+
 export const verificationStatusEnum = pgEnum("verification_status", [
   "pending",
   "verified",
@@ -71,7 +79,7 @@ export const verification = pgTable("verification", {
     updatedAt: timestamp("updated_at").defaultNow(), 
 });
 
-// ─── ORGANIZATION (Better Auth owned + your fields) ────
+// ─── ORGANIZATION TABLE UPDATE ────────────────────────
 export const organization = pgTable("organization", {
   // Better Auth fields
   id: t.text("id").primaryKey(),
@@ -80,11 +88,11 @@ export const organization = pgTable("organization", {
   logo: t.text("logo"),
   metadata: t.jsonb("metadata").default({}),
   createdAt: t.timestamp("created_at", { withTimezone: true }).notNull(),
+  
+  // 🚀 Add the missing 'type' column here to clear the compiler error!
+  type: organizationTypeEnum("type").default("ngo").notNull(),
+
   // Your custom fields
-  ownerId: t.text("owner_id")
-    .notNull()
-    .references(() => user.id)
-    .unique(),
   phone: t.varchar("phone", { length: 20 }),
   address: t.text("address"),
   website: t.varchar("website", { length: 255 }),

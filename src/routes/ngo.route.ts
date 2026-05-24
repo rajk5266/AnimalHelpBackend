@@ -1,48 +1,58 @@
-// src/routes/ngo.ts
-import { Router } from "express";
-import { auth } from "../lib/auth.js";
-import { db } from "../db/db.js";
-import { organization } from "../db/schema.js";
-import { eq } from "drizzle-orm";
-import { fromNodeHeaders } from "better-auth/node";
+// // src/routes/ngo.ts
+// import { Router } from "express";
+// import { auth } from "../lib/auth.js";
+// import { db } from "../db/db.js";
+// import { organization, member } from "../db/schema.js"; // 👈 Make sure to import 'member' table
+// import { eq, and } from "drizzle-orm";
+// import { fromNodeHeaders } from "better-auth/node";
 
-const router = Router();
+// const router = Router();
 
-router.post("/register", async (req, res) => {
-  const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
-  if (!session) return res.status(401).json({ error: "Unauthorized" });
+// router.post("/register", async (req, res) => {
+//   const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+//   if (!session) return res.status(401).json({ error: "Unauthorized" });
 
-  const { name, phone, address, website, description, latitude, longitude } = req.body;
+//   const { name, phone, address, website, description, latitude, longitude } = req.body;
 
-  // check one-org-per-user
-  const existing = await db.query.organization.findFirst({
-    where: eq(organization.ownerId, session.user.id),
-  });
+//   // 1. Check one-org-per-user by querying the member table for "owner" status
+//   const existingOwnership = await db.query.member.findFirst({
+//     where: and(
+//       eq(member.userId, session.user.id),
+//       eq(member.role, "owner")
+//     ),
+//   });
 
-  if (existing) {
-    return res.status(409).json({ error: "You already have an organization" });
-  }
+//   if (existingOwnership) {
+//     return res.status(409).json({ error: "You already have an organization" });
+//   }
 
-  const slug = name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+//   const slug = name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
 
-  // create via Better Auth (handles members, roles, etc.)
-  const org = await auth.api.createOrganization({
-    headers: fromNodeHeaders(req.headers),
-    body: {
-      name,
-      slug,
-      userId: session.user.id,
-      metadata: { status: "pending" },
-    },
-  });
+//   // Create via Better Auth (handles membership generation inside the member table automatically)
+//   const org = await auth.api.createOrganization({
+//     headers: fromNodeHeaders(req.headers),
+//     body: {
+//       name,
+//       slug,
+//       userId: session.user.id,
+//       metadata: { status: "pending" },
+//     },
+//   });
 
-  // patch your extra fields
-  await db
-    .update(organization)
-    .set({ phone, address, website, description, latitude, longitude, ownerId: session.user.id })
-    .where(eq(organization.id, org.id));
+//   // 2. Patch your extra fields (REMOVED ownerId from the update object)
+//   await db
+//     .update(organization)
+//     .set({ 
+//       phone, 
+//       address, 
+//       website, 
+//       description, 
+//       latitude: latitude ? parseFloat(latitude) : null, // Ensured safe parsing if types get loose
+//       longitude: longitude ? parseFloat(longitude) : null, 
+//     })
+//     .where(eq(organization.id, org.id));
 
-  return res.status(201).json({ message: "NGO submitted for review", orgId: org.id });
-});
+//   return res.status(201).json({ message: "NGO submitted for review", orgId: org.id });
+// });
 
-export default router;
+// export default router;
