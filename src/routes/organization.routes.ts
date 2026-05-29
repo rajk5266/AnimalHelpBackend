@@ -1,81 +1,62 @@
 import { Router, Request, Response } from "express";
 import { auth } from "../lib/auth.js";
 import { db } from "../db/db.js";
-import { organization, userProfile, member } from "../db/schema.js";
-import { eq, and } from "drizzle-orm";
+import { organization, userProfile } from "../db/schema.js";
+import { eq } from "drizzle-orm";
 import { fromNodeHeaders } from "better-auth/node";
 
 import { getPublicOrganizations } from "../controllers/organization.public.js";
 
-
 const router = Router();
 
 // ─── POST /api/organization/register ───────────────────────────
-// Now open to everyone (Public Access)
+// Requires an authenticated session. Uses Better Auth's native
+// createOrganization API which automatically:
+//   1. Creates the org row (with additionalFields from the body)
+//   2. Creates a member row with role="owner" for the session user
+//   3. Runs beforeCreateOrganization hook (sets verified=false, status=pending)
+//   4. Respects allowedToCreateOrganization (prevents duplicates)
 router.post("/register", async (req: Request, res: Response) => {
   try {
-    // Try to get a session if it exists, but DO NOT drop or block if it's missing
     const session = await auth.api.getSession({
       headers: fromNodeHeaders(req.headers),
     });
+
+    if (!session) {
+      return res.status(401).json({ error: "You must be logged in to register an organization" });
+    }
 
     const { name, phone, address, website, description, latitude, longitude } = req.body;
 
     if (!name) return res.status(400).json({ error: "Organization name is required" });
 
-    // Enforce one-org constraint ONLY if the user is actively logged in
-    if (session?.user?.id) {
-      const existingOwnership = await db.query.member.findFirst({
-        where: and(
-          eq(member.userId, session.user.id),
-          eq(member.role, "owner")
-        ),
-      });
-      if (existingOwnership) {
-        return res.status(409).json({ error: "You already have a registered organization" });
-      }
-    }
-
+    // Generate slug from name
     const slug = name
       .toLowerCase()
       .trim()
       .replace(/\s+/g, "-")
       .replace(/[^a-z0-9-]/g, "");
 
-    // Generate a clean random unique string ID for the raw insert
-    const uniqueOrgId = `org_${Math.random().toString(36).substring(2, 11)}`;
-
-    // Direct DB Insertion bypasses Better Auth's session constraint rules completely
-    const [newOrg] = await db
-      .insert(organization)
-      .values({
-        id: uniqueOrgId,
+    // Delegate to Better Auth — handles org creation + member ownership + hooks
+    const newOrg = await auth.api.createOrganization({
+      headers: fromNodeHeaders(req.headers),
+      body: {
         name,
         slug,
-        phone,
-        address,
-        website,
-        description,
-        latitude: latitude ? parseFloat(latitude) : null,
-        longitude: longitude ? parseFloat(longitude) : null,
-        verificationStatus: "pending",
-        verified: false,
-        createdAt: new Date(),
-        // Pass submitted timestamp into metadata safely using the schema representation
-        metadata: JSON.stringify({ submittedAt: new Date().toISOString() }),
-      })
-      .returning();
+        phone: phone ?? undefined,
+        address: address ?? undefined,
+        website: website ?? undefined,
+        description: description ?? undefined,
+        latitude: latitude ? parseFloat(latitude) : undefined,
+        longitude: longitude ? parseFloat(longitude) : undefined,
+      },
+    });
 
-    // If an authenticated user submitted this, link them up as the owner in the member table
-    if (session?.user?.id) {
-      await db.insert(member).values({
-        id: `mem_${Math.random().toString(36).substring(2, 11)}`,
-        organizationId: newOrg.id,
-        userId: session.user.id,
-        role: "owner",
-        createdAt: new Date(),
-      });
-    }
+    // Set the newly created org as the user's active organization
+    await auth.api.setActiveOrganization({
+      headers: fromNodeHeaders(req.headers),
+      body: { organizationId: newOrg.id },
+    });
 
     return res.status(201).json({
       message: "Organization submitted for review successfully",
@@ -86,14 +67,24 @@ router.post("/register", async (req: Request, res: Response) => {
         verificationStatus: "pending",
       },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Organization register error:", err);
-    return res.status(500).json({ error: err.message });
+
+    // Better Auth throws APIError with a message for known cases
+    const message = err instanceof Error ? err.message : "Registration failed";
+
+    // Detect "not allowed to create" from Better Auth's allowedToCreateOrganization
+    if (message.includes("not allowed") || message.includes("already")) {
+      return res.status(409).json({ error: "You already have a registered organization" });
+    }
+
+    return res.status(500).json({ error: message });
   }
 });
 
 // ─── GET /api/organization/me ──────────────────────────────────
-// Keeps the auth lock active so users can look up their own connected profile data
+// Returns the organization the current user owns, using Better Auth's
+// native listOrganizations + getFullOrganization APIs.
 router.get("/me", async (req: Request, res: Response) => {
   try {
     const session = await auth.api.getSession({
@@ -101,51 +92,66 @@ router.get("/me", async (req: Request, res: Response) => {
     });
     if (!session) return res.status(401).json({ error: "Unauthorized" });
 
-    const result = await db
-      .select({
-        id: organization.id,
-        name: organization.name,
-        slug: organization.slug,
-        logo: organization.logo,
-        metadata: organization.metadata,
-        phone: organization.phone,
-        address: organization.address,
-        website: organization.website,
-        description: organization.description,
-        latitude: organization.latitude,
-        longitude: organization.longitude,
-        verified: organization.verified,
-        verificationStatus: organization.verificationStatus,
-        verifiedAt: organization.verifiedAt,
-        rejectedReason: organization.rejectedReason,
-        createdAt: organization.createdAt,
-      })
-      .from(member)
-      .where(
-        and(
-          eq(member.userId, session.user.id),
-          eq(member.role, "owner")
-        )
+    // Get all organizations the user belongs to (via Better Auth's member table)
+    const orgs = await auth.api.listOrganizations({
+      headers: fromNodeHeaders(req.headers),
+    });
+
+    if (!orgs || orgs.length === 0) {
+      return res.status(404).json({ error: "No organization found" });
+    }
+
+    // Find the org where the user is an owner
+    // listOrganizations returns objects with { id, name, slug, logo, metadata, createdAt, members }
+    // Each member has { userId, role }
+    const ownedOrg = orgs.find((org: any) =>
+      org.members?.some(
+        (m: any) => m.userId === session.user.id && m.role === "owner"
       )
-      .leftJoin(organization, eq(member.organizationId, organization.id))
-      .limit(1);
+    );
 
-    const myNgo = result[0];
+    if (!ownedOrg) {
+      return res.status(404).json({ error: "No organization found" });
+    }
 
-    if (!myNgo || !myNgo.id) {
+    // Get full organization details (includes all additional fields)
+    const fullOrg = await auth.api.getFullOrganization({
+      headers: fromNodeHeaders(req.headers),
+      query: { organizationId: ownedOrg.id },
+    });
+
+    if (!fullOrg) {
       return res.status(404).json({ error: "No organization found" });
     }
 
     return res.json({
-      ...myNgo,
+      id: fullOrg.id,
+      name: fullOrg.name,
+      slug: fullOrg.slug,
+      logo: fullOrg.logo,
+      metadata: fullOrg.metadata,
+      phone: (fullOrg as any).phone,
+      address: (fullOrg as any).address,
+      website: (fullOrg as any).website,
+      description: (fullOrg as any).description,
+      latitude: (fullOrg as any).latitude,
+      longitude: (fullOrg as any).longitude,
+      verified: (fullOrg as any).verified,
+      verificationStatus: (fullOrg as any).verificationStatus,
+      verifiedAt: (fullOrg as any).verifiedAt,
+      rejectedReason: (fullOrg as any).rejectedReason,
+      createdAt: fullOrg.createdAt,
       ownerId: session.user.id,
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to fetch organization";
+    return res.status(500).json({ error: message });
   }
 });
 
 // ─── GET /api/organization/admin/pending ───────────────────────
+// Admin-only: List all pending organizations. Uses direct DB query
+// because this is app-specific business logic (not covered by Better Auth).
 router.get("/admin/pending", async (req: Request, res: Response) => {
   try {
     const session = await auth.api.getSession({
@@ -166,12 +172,15 @@ router.get("/admin/pending", async (req: Request, res: Response) => {
     });
 
     return res.json(pending);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to fetch pending organizations";
+    return res.status(500).json({ error: message });
   }
 });
 
 // ─── PATCH /api/organization/admin/:orgId/verify ──────────────
+// Admin-only: Approve or reject an organization. Uses direct DB update
+// because this is app-specific business logic (not covered by Better Auth).
 router.patch("/admin/:orgId/verify", async (req: Request<{ orgId: string }>, res: Response) => {
   try {
     const session = await auth.api.getSession({
@@ -209,17 +218,15 @@ router.patch("/admin/:orgId/verify", async (req: Request<{ orgId: string }>, res
     return res.json({
       message: action === "approve" ? "Organization verified" : "Organization rejected",
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Verification action failed";
+    return res.status(500).json({ error: message });
   }
 });
 
 // ─── PUBLIC LISTING SEARCH DISCOVERY ROUTE ─────────────
-// Open route — No session checks or requireVerifiedOrg middleware needed!
+// Open route — No session checks or requireVerifiedOrg middleware needed.
+// Uses custom Drizzle query with Haversine geospatial SQL (no Better Auth equivalent).
 router.get("/", getPublicOrganizations);
-
-// ... your secure endpoints remain down here ...
-// router.post("/register", ...)
-// router.get("/me", ...)
 
 export default router;

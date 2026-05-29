@@ -1,6 +1,6 @@
 import express, { Express, Request, Response, NextFunction } from "express";
 import helmet from 'helmet';
-import { toWebHeaders } from "./utils/headers.js";
+import { fromNodeHeaders } from "better-auth/node";
 
 import cors from 'cors';
 import morgan from 'morgan';
@@ -10,7 +10,6 @@ import ApiError from './utils/apiError.js';
 import { env } from './config/env.js';
 import { apiLimiter } from './middlewares/rateLimiter.js';
 
-import ngoRoutes from "./routes/organization.routes.js";
 import organization from "./routes/organization.routes.js";
 import { auth } from './lib/auth.js';
 import { toNodeHandler } from "better-auth/node";
@@ -59,7 +58,7 @@ app.use(hpp());
 // Protected route — verify session via better-auth
 app.get("/api/me", async (req, res) => {
     const session = await auth.api.getSession({
-        headers: toWebHeaders(req.headers),
+        headers: fromNodeHeaders(req.headers),
     });
 
     if (!session) return res.status(401).json({ message: "Unauthorized" });
@@ -68,7 +67,6 @@ app.get("/api/me", async (req, res) => {
 });
 
 app.use('/api/organization', organization);
-// app.use('/api/rescues', rescueRoutes);
 // entire route group protected in one line
 // app.use("/api/ngos/rescues", requireVerifiedOrg, rescueRoutes);
 // app.use("/api/ngos/animals", requireVerifiedOrg, animalRoutes);
