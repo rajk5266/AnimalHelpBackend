@@ -1,8 +1,8 @@
 import { Router, Request, Response } from "express";
 import { auth } from "../lib/auth.js";
 import { db } from "../db/db.js";
-import { organization, userProfile } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { organization, userProfile, member } from "../db/schema.js";
+import { eq, and } from "drizzle-orm";
 import { fromNodeHeaders } from "better-auth/node";
 
 import { getPublicOrganizations } from "../controllers/organization.public.js";
@@ -26,7 +26,18 @@ router.post("/register", async (req: Request, res: Response) => {
       return res.status(401).json({ error: "You must be logged in to register an organization" });
     }
 
-    const { name, phone, address, website, description, latitude, longitude } = req.body;
+    const {
+      name,
+      phone,
+      address,
+      website,
+      description,
+      latitude,
+      longitude,
+      organizationType,
+      registrationId,
+      images,
+    } = req.body;
 
     if (!name) return res.status(400).json({ error: "Organization name is required" });
 
@@ -36,6 +47,16 @@ router.post("/register", async (req: Request, res: Response) => {
       .trim()
       .replace(/\s+/g, "-")
       .replace(/[^a-z0-9-]/g, "");
+
+    // Map organizationType from frontend to the database type enum
+    let mappedType: "ngo" | "clinic" | "shelter" | "rescue_center" = "ngo";
+    if (organizationType === "clinic" || organizationType === "hospital") {
+      mappedType = "clinic";
+    } else if (organizationType === "shelter") {
+      mappedType = "shelter";
+    } else if (organizationType === "rescueteam" || organizationType === "rescue_center") {
+      mappedType = "rescue_center";
+    }
 
     // Delegate to Better Auth — handles org creation + member ownership + hooks
     const newOrg = await auth.api.createOrganization({
@@ -51,6 +72,19 @@ router.post("/register", async (req: Request, res: Response) => {
         longitude: longitude ? parseFloat(longitude) : undefined,
       },
     });
+
+    // Update the custom type and metadata columns directly using Drizzle
+    await db
+      .update(organization)
+      .set({
+        type: mappedType,
+        metadata: {
+          submittedAt: new Date().toISOString(),
+          registrationId: registrationId ?? undefined,
+          images: images ?? undefined,
+        },
+      })
+      .where(eq(organization.id, newOrg.id));
 
     // Set the newly created org as the user's active organization
     await auth.api.setActiveOrganization({
@@ -92,32 +126,21 @@ router.get("/me", async (req: Request, res: Response) => {
     });
     if (!session) return res.status(401).json({ error: "Unauthorized" });
 
-    // Get all organizations the user belongs to (via Better Auth's member table)
-    const orgs = await auth.api.listOrganizations({
-      headers: fromNodeHeaders(req.headers),
+    // Find the member record where the user is the owner
+    const memberRecord = await db.query.member.findFirst({
+      where: and(
+        eq(member.userId, session.user.id),
+        eq(member.role, "owner")
+      ),
     });
 
-    if (!orgs || orgs.length === 0) {
+    if (!memberRecord) {
       return res.status(404).json({ error: "No organization found" });
     }
 
-    // Find the org where the user is an owner
-    // listOrganizations returns objects with { id, name, slug, logo, metadata, createdAt, members }
-    // Each member has { userId, role }
-    const ownedOrg = orgs.find((org: any) =>
-      org.members?.some(
-        (m: any) => m.userId === session.user.id && m.role === "owner"
-      )
-    );
-
-    if (!ownedOrg) {
-      return res.status(404).json({ error: "No organization found" });
-    }
-
-    // Get full organization details (includes all additional fields)
-    const fullOrg = await auth.api.getFullOrganization({
-      headers: fromNodeHeaders(req.headers),
-      query: { organizationId: ownedOrg.id },
+    // Get full organization details directly from the DB
+    const fullOrg = await db.query.organization.findFirst({
+      where: eq(organization.id, memberRecord.organizationId),
     });
 
     if (!fullOrg) {
@@ -130,16 +153,16 @@ router.get("/me", async (req: Request, res: Response) => {
       slug: fullOrg.slug,
       logo: fullOrg.logo,
       metadata: fullOrg.metadata,
-      phone: (fullOrg as any).phone,
-      address: (fullOrg as any).address,
-      website: (fullOrg as any).website,
-      description: (fullOrg as any).description,
-      latitude: (fullOrg as any).latitude,
-      longitude: (fullOrg as any).longitude,
-      verified: (fullOrg as any).verified,
-      verificationStatus: (fullOrg as any).verificationStatus,
-      verifiedAt: (fullOrg as any).verifiedAt,
-      rejectedReason: (fullOrg as any).rejectedReason,
+      phone: fullOrg.phone,
+      address: fullOrg.address,
+      website: fullOrg.website,
+      description: fullOrg.description,
+      latitude: fullOrg.latitude,
+      longitude: fullOrg.longitude,
+      verified: fullOrg.verified,
+      verificationStatus: fullOrg.verificationStatus,
+      verifiedAt: fullOrg.verifiedAt,
+      rejectedReason: fullOrg.rejectedReason,
       createdAt: fullOrg.createdAt,
       ownerId: session.user.id,
     });

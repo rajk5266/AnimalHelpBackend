@@ -23,6 +23,12 @@ const envSchema = z.object({
     EMAIL_SENDER: z.string(),
     GOOGLE_CLIENT_ID: z.string().min(1),
     GOOGLE_CLIENT_SECRET: z.string().min(1),
+
+    R2_ACCOUNT_ID: z.string().min(1),
+    R2_ACCESS_KEY_ID: z.string().min(1),
+    R2_SECRET_ACCESS_KEY: z.string().min(1),
+    R2_BUCKET: z.string().min(1),
+    R2_PUBLIC_URL: z.string().url(),
 });
 
 const processEnv = envSchema.safeParse(process.env);

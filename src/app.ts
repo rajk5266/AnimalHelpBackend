@@ -15,6 +15,8 @@ import { auth } from './lib/auth.js';
 import { toNodeHandler } from "better-auth/node";
 import { requireVerifiedOrg } from "./middlewares/requireVerifiedOrg.js";
 
+import uploadRoutes from "./routes/upload.routes.js";
+
 const app: Express = express();
 
 // ─── 1) GLOBAL MIDDLEWARES ──────────────────────────────────────────────────
@@ -67,6 +69,7 @@ app.get("/api/me", async (req, res) => {
 });
 
 app.use('/api/organization', organization);
+app.use('/api/upload', uploadRoutes);
 // entire route group protected in one line
 // app.use("/api/ngos/rescues", requireVerifiedOrg, rescueRoutes);
 // app.use("/api/ngos/animals", requireVerifiedOrg, animalRoutes);
